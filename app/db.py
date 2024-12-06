@@ -115,11 +115,11 @@ async def get_cart_items(pool: asyncpg.pool.Pool, user_id: str):
     """
     async with pool.acquire() as conn:
         return await conn.fetch("""
-            SELECT c.product_id, p.name, p.description, p.price, p.stock, c.quantity, (p.price * c.quantity) AS total_cost
-            FROM cart c
-            JOIN products p ON c.product_id = p.product_id
-            WHERE c.user_id = $1
+            SELECT product_id, name, description, price, stock, quantity, total_cost
+            FROM cart_details
+            WHERE user_id = $1
         """, user_id)
+
 
 
 async def remove_from_cart(pool: asyncpg.pool.Pool, user_id: str, product_id: str):
@@ -175,65 +175,9 @@ async def get_last_orders(pool: asyncpg.pool.Pool, user_id: str):
 
 
 async def process_order(pool: asyncpg.pool.Pool, user_id: str):
-    """
-    Обработать заказ пользователя.
-    """
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            # Получаем товары из корзины
-            cart_items = await conn.fetch("""
-                SELECT c.product_id, c.quantity, p.price, p.stock
-                FROM cart c
-                JOIN products p ON c.product_id = p.product_id
-                WHERE c.user_id = $1
-            """, user_id)
-
-            if not cart_items:
-                raise ValueError("Корзина пуста.")
-
-            # Проверяем доступность товаров и собираем данные для заказа
-            total_cost = 0
-            order_items = []
-            for item in cart_items:
-                if item['quantity'] > item['stock']:
-                    raise ValueError(f"Недостаточно товара на складе для продукта {item['product_id']}")
-                total_cost += item['price'] * item['quantity']
-                order_items.append({
-                    'product_id': item['product_id'],
-                    'quantity': item['quantity'],
-                    'price': item['price']
-                })
-
-            # Создаем новый заказ
-            order_id = uuid.uuid4()
-            await conn.execute("""
-                INSERT INTO orders (order_id, user_id, total_cost, order_date, status)
-                VALUES ($1, $2, $3, NOW(), $4)
-            """, order_id, user_id, total_cost, 'Pending')
-
-            # Добавляем записи в order_items
-            for item in order_items:
-                await conn.execute("""
-                    INSERT INTO order_items (order_id, product_id, quantity, price)
-                    VALUES ($1, $2, $3, $4)
-                """, order_id, item['product_id'], item['quantity'], item['price'])
-
-                # Обновляем запас продукта
-                await conn.execute("""
-                    UPDATE products SET stock = stock - $1 WHERE product_id = $2
-                """, item['quantity'], item['product_id'])
-
-            # Добавляем запись в order_history
-            history_id = uuid.uuid4()
-            await conn.execute("""
-                INSERT INTO order_history (history_id, order_id, status, change_date)
-                VALUES ($1, $2, $3, NOW())
-            """, history_id, order_id, 'Pending')
-
-            # Очищаем корзину пользователя
-            await conn.execute("""
-                DELETE FROM cart WHERE user_id = $1
-            """, user_id)
+        # Вызов хранимой процедуры, которая сама проведет все операции
+        await conn.execute("CALL process_user_order($1)", user_id)
 
 async def add_product(pool, name, description, price, stock, manufacturer, category_id=None):
     async with pool.acquire() as conn:
@@ -279,12 +223,6 @@ async def update_order_status(pool, order_id, new_status):
         await conn.execute("""
             UPDATE orders SET status = $1 WHERE order_id = $2
         """, new_status, order_id)
-        # Добавляем запись в историю заказов
-        history_id = uuid.uuid4()
-        await conn.execute("""
-            INSERT INTO order_history (history_id, order_id, status, change_date)
-            VALUES ($1, $2, $3, NOW())
-        """, history_id, order_id, new_status)
 
 async def get_product_by_id(pool: asyncpg.pool.Pool, product_id: str):
     """
@@ -321,7 +259,7 @@ async def get_reviews_by_product_id(pool: asyncpg.pool.Pool, product_id: str):
 async def get_average_rating(pool: asyncpg.pool.Pool, product_id: str):
     async with pool.acquire() as conn:
         return await conn.fetchval("""
-            SELECT AVG(rating) FROM reviews WHERE product_id = $1
+            SELECT get_average_product_rating($1)
         """, product_id)
 
 async def search_products(pool: asyncpg.pool.Pool, query: str = '', category_id: str = '', manufacturer: str = ''):

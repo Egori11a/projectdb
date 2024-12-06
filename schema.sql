@@ -96,3 +96,97 @@ CREATE TABLE reviews (
 
 -- Заполнение таблиц тестовыми данными
 INSERT INTO roles (name) VALUES ('User'), ('Admin');
+
+CREATE OR REPLACE PROCEDURE process_user_order(uid UUID)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    cart_item RECORD;
+    total_cost NUMERIC := 0;
+    order_id UUID := uuid_generate_v4();
+BEGIN
+    -- Получаем товары из корзины
+    FOR cart_item IN
+        SELECT product_id, quantity, price, stock
+        FROM cart_details
+        WHERE user_id = uid
+    LOOP
+        -- Проверяем наличие на складе
+        IF cart_item.quantity > cart_item.stock THEN
+            RAISE EXCEPTION 'Недостаточно товара на складе для продукта %', cart_item.product_id;
+        END IF;
+        -- Считаем итоговую стоимость
+        total_cost := total_cost + (cart_item.price * cart_item.quantity);
+    END LOOP;
+
+    IF total_cost = 0 THEN
+        RAISE EXCEPTION 'Корзина пуста.';
+    END IF;
+
+    -- Создаем новый заказ
+    INSERT INTO orders (order_id, user_id, total_cost, order_date, status)
+    VALUES (order_id, uid, total_cost, NOW(), 'Pending');
+
+    -- Добавляем товары из корзины в order_items и обновляем остатки
+    FOR cart_item IN
+        SELECT product_id, quantity, price, stock
+        FROM cart_details
+        WHERE user_id = uid
+    LOOP
+        INSERT INTO order_items (order_id, product_id, quantity, price)
+        VALUES (order_id, cart_item.product_id, cart_item.quantity, cart_item.price);
+
+        UPDATE products SET stock = stock - cart_item.quantity WHERE product_id = cart_item.product_id;
+    END LOOP;
+
+    -- Очищаем корзину пользователя
+    DELETE FROM cart WHERE user_id = uid;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_average_product_rating(product_id UUID)
+RETURNS NUMERIC AS $$
+BEGIN
+    RETURN (SELECT AVG(rating)::NUMERIC FROM reviews WHERE product_id = product_id);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION log_order_history()
+RETURNS TRIGGER AS $$
+DECLARE
+    history_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO order_history (history_id, order_id, status, change_date)
+    VALUES (history_id, NEW.order_id, NEW.status, NOW());
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION log_order_history()
+RETURNS TRIGGER AS $$
+DECLARE
+    history_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO order_history (history_id, order_id, status, change_date)
+    VALUES (history_id, NEW.order_id, NEW.status, NOW());
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER order_history_trigger
+   AFTER INSERT OR UPDATE ON orders
+   FOR EACH ROW
+   EXECUTE FUNCTION log_order_history();
+
+CREATE OR REPLACE VIEW cart_details AS
+SELECT 
+    c.user_id,
+    c.product_id,
+    p.name,
+    p.description,
+    p.price,
+    p.stock,
+    c.quantity,
+    (p.price * c.quantity) AS total_cost
+FROM cart c
+JOIN products p ON c.product_id = p.product_id;
